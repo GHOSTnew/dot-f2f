@@ -129,55 +129,70 @@ def proxy_thread(conn, client_addr):
         port = int((temp[(port_pos+1):])[:webserver_pos-port_pos-1])
         webserver = temp[:port_pos] 
     host_existe = False
-    host_serv = ''
-    fichier = open("conf/host.txt", "r")
-    for ligne in fichier:
-        if ligne.split(" ")[0] == webserver:
-            host_serv = ligne.split(" ")[1].split("\n")[0]
-            host_existe = True
-    fichier.close()
-    if host_existe:
-        global_conf = ConfigParser.ConfigParser()
-        global_conf.read('conf/global.ini')
-        if global_conf.getboolean('proxy', 'Tor'):
-            socks.setdefaultproxy(socks.PROXY_TYPE_SOCKS5, "127.0.0.1", 9050, True)
-        else:
-            socks.setdefaultproxy()
-        socket.socket = socks.socksocket
-        try:
-            s = socket.socket(socket.AF_INET, socket.SOCK_STREAM)  
-            s.connect((host_serv, port))
-            s.send(request)
+    if webserver.__contains__(".f2f"):
+        host_serv = ''
+        fichier = open("conf/host.txt", "r")
+        for ligne in fichier:
+            if ligne.split(" ")[0] == webserver:
+                host_serv = ligne.split(" ")[1].split("\n")[0]
+                host_existe = True
+        fichier.close()
+        if host_existe:
+            global_conf = ConfigParser.ConfigParser()
+            global_conf.read('conf/global.ini')
+            if global_conf.getboolean('proxy', 'Tor'):
+                socks.setdefaultproxy(socks.PROXY_TYPE_SOCKS5, "127.0.0.1", 9050, True)
+            else:
+                socks.setdefaultproxy()
+            socket.socket = socks.socksocket
+            try:
+                s = socket.socket(socket.AF_INET, socket.SOCK_STREAM)  
+                s.connect((host_serv, port))
+                s.send(request)
  
-            while 1:
-                data = s.recv(4096)
+                while 1:
+                    data = s.recv(4096)
             
-                if data:
-                    print data
-                    conn.send(data)
-                else:
-                    break
-            s.close()
-            conn.close()
-        except socket.error, (value, message):
-            if s:
+                    if data:
+                        print data
+                        conn.send(data)
+                    else:
+                        break
                 s.close()
-            if conn:
                 conn.close()
-            print "Runtime Error:", message
+            except socket.error, (value, message):
+                if s:
+                    s.close()
+                if conn:
+                    conn.close()
+                print "Runtime Error:", message
+        else:
+            fichier = open("conf/error/404.html")
+            error = ""
+            for line in fichier:
+                line = line.replace("{{domaine}}", webserver)
+                error += line
+            result = """HTTP/1.1 404 NOT FOUND\r
+Upgrade: WebSocket\r
+Connection: Upgrade\r
+Content-Type: text/html; charset=utf-8""".strip() + '\r\n\r\n' + "\x00"+ error
+            print result
+            conn.send(result)
+            conn.close()
     else:
-        fichier = open("conf/error/404.html")
+        fichier = open("conf/error/500.html")
         error = ""
         for line in fichier:
             line = line.replace("{{domaine}}", webserver)
             error += line
-        result = """HTTP/1.1 404 NOT FOUND\r
+        result = """HTTP/1.1 500 internal server error\r
 Upgrade: WebSocket\r
 Connection: Upgrade\r
 Content-Type: text/html; charset=utf-8""".strip() + '\r\n\r\n' + "\x00"+ error
         print result
         conn.send(result)
         conn.close()
+
 if __name__ == "__main__":
     thread.start_new_thread(send_to_peers, ())
     thread.start_new_thread(recv_host, ())
