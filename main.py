@@ -22,6 +22,7 @@ import socket
 import ConfigParser
 import thread
 import time
+import ssl
 
 def send_to_peers():
     while True:
@@ -29,24 +30,23 @@ def send_to_peers():
         peers_conf = ConfigParser.ConfigParser()
         peers_conf.read('conf/peers.ini')
         for i in range(len(peers_conf.sections())):
-            if peers_conf.get(peers_conf.sections()[i], 'Tor'):
+            if peers_conf.getboolean(peers_conf.sections()[i], 'Tor'):
                 socks.setdefaultproxy(socks.PROXY_TYPE_SOCKS5, "127.0.0.1", 9050, True)
             else:
                 socks.setdefaultproxy()
             socket.socket = socks.socksocket
+            s = socket.socket()
             try:
-                s.connect((peers_conf.get(peers_conf.sections()[i], 'host'), peers_conf.get(peers_conf.sections()[i], 'port')))
+                s.connect((peers_conf.get(peers_conf.sections()[i], 'host'), peers_conf.getint(peers_conf.sections()[i], 'port')))
                 hostlist = open("conf/host.txt", "r")
                 for ligne in hostlist:
                     s.send(ligne)
                 hostlist.close()
-            except: 
+                s.close()
+            except:
                 s.close()
                 print "\0034connexion impossible"
                 error = error +1
-                continue
-            else:
-                s.close()
             i=i+1
         if error == len(peers_conf.sections()): 
             print "Error aucun pair disponible"
@@ -54,45 +54,48 @@ def send_to_peers():
         time.sleep(3600)
        
 def recv_host():
-    toute_data = ""
-    buffer = ""
+    toute_data = []
+    host_tab = []
     global_conf = ConfigParser.ConfigParser()
     global_conf.read('conf/global.ini')
     lsock = socket.socket()
-    lsock.bind( (global_conf.get('router', 'ip'), global_conf.getint('router', 'port')) )
-    lsock.listen( 5 )
+    lsock.bind((global_conf.get('router', 'ip'), global_conf.getint('router', 'port')))
+    lsock.listen(5)
     while True:
         client, (remhost, remport) = lsock.accept()
         while True:
             data = client.recv(1024)
-            data += toute_data + "\n"
-            if not block:
+            print data
+            if not data:
                break
+            toute_data.append(data.replace('\n','').replace('\r', ''))
         fichier = open("conf/host.txt", "r")
         lignes = fichier.readlines()
         x = 0
-        if len(toute_data >= lignes):
-            for d in toute_data.split("\n"):
-                if d != lignes.split("\n")[x]:
-                    buffer += d + "\n" 
-                else:
-                    buffer += lignes[x]
-                if x < len(lignes)-1:
-                    x += 1
-        else:
-            for l in lignes.split("\n"):
-                if l != toute_data.split("\n")[x]:
-                    buffer += l + "\n"
-                else:
-                    buffer += toute_data.split("\n")[x] + "\n"
-                if x < len(lignes)-1:
-                    x += 1
-                
+        for d in toute_data:
+            found = False
+            for l in lignes:
+                if d == l.replace("\n", ""):
+                    found = True
+            if found:
+                host_tab.append(l)
+            else:
+                host_tab.append(d + "\n")
+        for l in lignes:
+            found = False
+            for d in toute_data:
+                if d == l.replace("\n", ""):
+                    found = True
+            if not found:
+                host_tab.append(l)
         fichier.close
         fichier = open("conf/host.txt", "w")
-        fichier.write(buffer)
-        buffer = ""
-        toute_data = ""
+        a = ""
+        for l in host_tab:
+            a += l
+        fichier.write(a)
+        host_tab = []
+        toute_data = []
         fichier.close()
         client.close()
 
@@ -148,6 +151,13 @@ def proxy_thread(conn, client_addr):
             try:
                 s = socket.socket(socket.AF_INET, socket.SOCK_STREAM)  
                 s.connect((host_serv, port))
+                if port == 443 or port == 6697:
+                    try:
+                        s = ssl.wrap_socket(s)
+                        s.tsock.do_handshake()
+                    except:
+                        print "[-] Failed to do ssl handshake"
+
                 s.send(request)
  
                 while 1:
