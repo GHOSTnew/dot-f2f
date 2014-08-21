@@ -23,6 +23,9 @@ import ConfigParser
 import thread
 import time
 import ssl
+import asyncore
+import asynchat
+from threading import Thread
 
 def send_to_peers():
     while True:
@@ -99,111 +102,144 @@ def recv_host():
         fichier.close()
         client.close()
 
-def proxy():
-    global_conf = ConfigParser.ConfigParser()
-    global_conf.read('conf/global.ini')
-    s = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
-    s.bind((global_conf.get('proxy', 'ip'),  global_conf.getint('proxy', 'port')))
-    s.listen(30)
-    while 1:
-        conn, client_addr = s.accept()
-        thread.start_new_thread(proxy_thread, (conn, client_addr))
-    s.close()
+########################
+class proxy_server (asyncore.dispatcher):
+    
+    def __init__ (self):
+        asyncore.dispatcher.__init__ (self)
+        global_conf = ConfigParser.ConfigParser()
+        global_conf.read('conf/global.ini')
+        here = (global_conf.get('proxy', 'ip'),  global_conf.getint('proxy', 'port'))
+        self.create_socket(socket.AF_INET, socket.SOCK_STREAM)
+        self.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
+        self.set_reuse_addr()
+        self.bind (here)
+        self.listen (5)
 
-def proxy_thread(conn, client_addr):
-    request = conn.recv(4096)
-    first_line = request.split('\n')[0]
-    url = first_line.split(' ')[1]
-    http_pos = url.find("://")
-    if (http_pos==-1):
-        temp = url
-    else:
-        temp = url[(http_pos+3):]
-    port_pos = temp.find(":")
-    webserver_pos = temp.find("/")
-    if webserver_pos == -1:
-        webserver_pos = len(temp)
-    webserver = ""
-    port = -1
-    if (port_pos==-1 or webserver_pos < port_pos):
-        port = 80
-        webserver = temp[:webserver_pos]
-    else:
-        port = int((temp[(port_pos+1):])[:webserver_pos-port_pos-1])
-        webserver = temp[:port_pos] 
-    host_existe = False
-    if webserver.__contains__(".f2f"):
-        host_serv = ''
-        fichier = open("conf/host.txt", "r")
-        for ligne in fichier:
-            if ligne.split(" ")[0] == webserver:
-                host_serv = ligne.split(" ")[1].split("\n")[0]
-                host_existe = True
-        fichier.close()
-        if host_existe:
-            global_conf = ConfigParser.ConfigParser()
-            global_conf.read('conf/global.ini')
-            if global_conf.getboolean('proxy', 'Tor'):
-                socks.setdefaultproxy(socks.PROXY_TYPE_SOCKS5, "127.0.0.1", 9050, True)
-            else:
-                socks.setdefaultproxy()
-            socket.socket = socks.socksocket
-            try:
-                s = socket.socket(socket.AF_INET, socket.SOCK_STREAM)  
-                s.connect((host_serv, port))
-                if port == 443 or port == 6697:
-                    try:
-                        s = ssl.wrap_socket(s)
-                        s.tsock.do_handshake()
-                    except:
-                        print "[-] Failed to do ssl handshake"
+    def handle_accept (self):
+        sockAccept = self.accept()
+        proxy_receiver (self, sockAccept)
 
-                s.send(request)
- 
-                while 1:
-                    data = s.recv(4096)
-            
-                    if data:
-                        print data
-                        conn.send(data)
-                    else:
-                        break
-                s.close()
-                conn.close()
-            except socket.error, (value, message):
-                if s:
-                    s.close()
-                if conn:
-                    conn.close()
-                print "Runtime Error:", message
+class proxy_sender (asynchat.async_chat):
+
+    def __init__ (self, receiver):
+        asynchat.async_chat.__init__ (self)
+        self.receiver = receiver
+        #socks.setdefaultproxy(socks.PROXY_TYPE_SOCKS5, "127.0.0.1", 9050, True)
+        global_conf = ConfigParser.ConfigParser()
+        global_conf.read('conf/global.ini')
+        if global_conf.getboolean('proxy', 'Tor'):
+            socks.setdefaultproxy(socks.PROXY_TYPE_SOCKS5, "127.0.0.1", 9050, True)
         else:
-            fichier = open("conf/error/404.html")
+            socks.setdefaultproxy()
+        socket.socket = socks.socksocket
+        self.tsock = socket.socket()
+        #(socket.AF_INET)
+
+    def connect(self, host, port):
+        try:
+           self.tsock = socket.socket()
+           self.tsock.connect((host, port))
+           if port == 443:
+               try:
+                   self.tsock = ssl.wrap_socket(self.tsock)
+                   self.tsock.do_handshake()
+               except:
+                   print "[-] Failed to do ssl handshake"
+        except:
+           pass
+
+    def recv(self):
+        while True:
+            try:
+                block = self.tsock.recv(4096)
+                if not block:
+                   self.receiver.handle_close()  
+                   break
+                self.receiver.push(block)
+            except:
+                pass   
+ 
+    def send(self, msg):
+        self.tsock.send(msg)
+
+    def die(self):
+        self.tsock.close()
+
+class proxy_receiver (asynchat.async_chat):
+
+    def __init__ (self,server, (conn, addr)):
+        asynchat.async_chat.__init__ (self, conn)
+        self.set_terminator ("\r\n\r\n")
+        self.sender = proxy_sender(self)
+        self.buffer = ''
+
+    def collect_incoming_data (self, data):
+        self.buffer = self.buffer + data
+        
+    def found_terminator (self):
+        data = self.buffer
+        self.buffer = ''
+        first_line = data.split('\n')[0]
+        url = first_line.split(' ')[1]
+        http_pos = url.find("://")
+        if (http_pos==-1):
+            temp = url
+        else:
+            temp = url[(http_pos+3):]
+        port_pos = temp.find(":")
+        webserver_pos = temp.find("/")
+        if webserver_pos == -1:
+           webserver_pos = len(temp)
+        webserver = ""
+        port = -1
+        if (port_pos==-1 or webserver_pos < port_pos):
+            port = 80
+            webserver = temp[:webserver_pos]
+        else:
+            port = int((temp[(port_pos+1):])[:webserver_pos-port_pos-1])
+            webserver = temp[:port_pos] 
+        host_existe = False
+        if webserver.__contains__(".f2f"):
+            host_serv = ''
+            fichier = open("conf/host.txt", "r")
+            for ligne in fichier:
+                if ligne.split(" ")[0] == webserver:
+                    host_serv = ligne.split(" ")[1].split("\n")[0]
+                    host_existe = True
+            fichier.close()
+            if host_existe:
+                self.sender.die()
+                self.sender.connect(host_serv, port)
+                Thread(target=self.sender.recv).start()
+                self.sender.send (data + "\r\n\r\n")
+            else:
+                fichier = open("conf/error/404.html")
+                error = ""
+                for line in fichier:
+                    line = line.replace("{{domaine}}", webserver)
+                    error += line
+                self.push( """HTTP/1.1 404 NOT FOUND\r
+Upgrade: WebSocket\r
+Connection: Upgrade\r
+Content-Type: text/html; charset=utf-8""".strip() + '\r\n\r\n' + "\x00"+ error)
+        else:
+            fichier = open("conf/error/500.html")
             error = ""
             for line in fichier:
                 line = line.replace("{{domaine}}", webserver)
                 error += line
-            result = """HTTP/1.1 404 NOT FOUND\r
+            self.push("""HTTP/1.1 500 internal server error\r
 Upgrade: WebSocket\r
 Connection: Upgrade\r
-Content-Type: text/html; charset=utf-8""".strip() + '\r\n\r\n' + "\x00"+ error
-            print result
-            conn.send(result)
-            conn.close()
-    else:
-        fichier = open("conf/error/500.html")
-        error = ""
-        for line in fichier:
-            line = line.replace("{{domaine}}", webserver)
-            error += line
-        result = """HTTP/1.1 500 internal server error\r
-Upgrade: WebSocket\r
-Connection: Upgrade\r
-Content-Type: text/html; charset=utf-8""".strip() + '\r\n\r\n' + "\x00"+ error
-        print result
-        conn.send(result)
-        conn.close()
+Content-Type: text/html; charset=utf-8""".strip() + '\r\n\r\n' + "\x00"+ error)
+
+    def handle_close (self):
+        self.sender.die()
+        self.close()
 
 if __name__ == "__main__":
     thread.start_new_thread(send_to_peers, ())
     thread.start_new_thread(recv_host, ())
-    proxy()
+    proxy_server()
+    asyncore.loop()
